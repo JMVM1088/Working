@@ -3,7 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import os
+import sqlite3
 import yfinance as yf
+import Util
 
 # --- STRATEGY CONFIGURATION ---
 # Pattern Settings
@@ -104,7 +106,7 @@ def analyze_market_regime(market_df: pd.DataFrame, current_date) -> str:
     
     return 'BULLISH' if row['Close'] > row['SMA_200'] else 'BEARISH'
 
-def generate_signal(df_window: pd.DataFrame, market_status: str) -> dict:
+def generate_signal(df_window: pd.DataFrame, market_status: str, debug=False) -> dict:
     """
     Core Logic: Detects pattern, Applies Filters (Regime, Apex, OBV).
     """
@@ -114,6 +116,9 @@ def generate_signal(df_window: pd.DataFrame, market_status: str) -> dict:
     high_pivots = get_pivot_points(df_window['High'], PIVOT_LOOKBACK_WINDOW, 'high')
     low_pivots = get_pivot_points(df_window['Low'], PIVOT_LOOKBACK_WINDOW, 'low')
 
+    if debug:
+        print(f"  DEBUG: Found {len(high_pivots)} high pivots, {len(low_pivots)} low pivots (need {N_PIVOTS_FIT} each)")
+    
     if len(high_pivots) < N_PIVOTS_FIT or len(low_pivots) < N_PIVOTS_FIT:
         return result
 
@@ -131,6 +136,9 @@ def generate_signal(df_window: pd.DataFrame, market_status: str) -> dict:
 
     # 2. CONVERGENCE CHECK
     is_converging = (high_slope < low_slope) and (abs(high_slope - low_slope) > MIN_SLOPE_DIFF)
+    if debug:
+        print(f"  DEBUG: high_slope={high_slope:.8f}, low_slope={low_slope:.8f}, slope_diff={abs(high_slope - low_slope):.8f}, MIN_SLOPE_DIFF={MIN_SLOPE_DIFF}")
+        print(f"  DEBUG: Is converging? {is_converging}")
     if not is_converging: return result
 
     # 3. SCORING (Tightness/Volume)
@@ -144,6 +152,9 @@ def generate_signal(df_window: pd.DataFrame, market_status: str) -> dict:
     tight_score = 45 if (last_range / df_window['Close'].mean()) < 0.05 else 0 # Simple threshold
     
     total_score = 40 + tight_score + vol_score # Base convergence score assumed 40 if passed
+    
+    if debug:
+        print(f"  DEBUG: vol_score={vol_score}, tight_score={tight_score}, total_score={total_score}, threshold={SCORE_THRESHOLD}")
     
     if total_score < SCORE_THRESHOLD:
         result['reason'] = 'Low Score'
@@ -206,6 +217,41 @@ def generate_signal(df_window: pd.DataFrame, market_status: str) -> dict:
     return result
 
 # --- MOCK DATA GENERATION ---
+
+def load_data_from_sqlite(db_file: str, ticker: str, table_name: str = 'HistoricalPrices'):
+    """
+    Loads OHLCV data for a given ticker from SQLite database.
+    Returns (stock_df, market_df) where stock_df has columns: High, Low, Close, Volume
+    and market_df has columns: Close, SMA_200 (for market regime analysis).
+    """
+    # Use Util.get_data_from_sqlite to fetch rows without opening a raw connection here
+    query_stock = f"SELECT Date, Open, High, Low, Close, Volume FROM {table_name} WHERE Ticker=? ORDER BY Date"
+    rows = Util.get_data_from_sqlite(db_file, query_stock, params=(ticker,))
+    if not rows:
+        raise ValueError(f"No data found for {ticker} in {table_name}")
+
+    stock_df = pd.DataFrame(rows, columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    stock_df['Date'] = pd.to_datetime(stock_df['Date'], errors='coerce')
+    stock_df = stock_df.dropna(subset=['Date']).set_index('Date')
+    stock_df = stock_df[['High', 'Low', 'Close', 'Volume']].copy()
+
+    # Load SPY data for market regime analysis via Util
+    query_spy = f"SELECT Date, Close FROM {table_name} WHERE Ticker='SPY' ORDER BY Date"
+    spy_rows = Util.get_data_from_sqlite(db_file, query_spy)
+    if not spy_rows:
+        # Fallback: create market_df matching stock dates
+        market_df = pd.DataFrame(index=stock_df.index)
+        market_df['Close'] = stock_df['Close']
+        market_df['SMA_200'] = market_df['Close'].rolling(window=200).mean()
+    else:
+        spy_df = pd.DataFrame(spy_rows, columns=['Date', 'Close'])
+        spy_df['Date'] = pd.to_datetime(spy_df['Date'], errors='coerce')
+        spy_df = spy_df.dropna(subset=['Date']).set_index('Date')
+        market_df = spy_df[['Close']].copy()
+        market_df['SMA_200'] = market_df['Close'].rolling(window=200).mean()
+
+    return stock_df, market_df
+
 
 def generate_mock_data(symbol, days=3650, market_trend='BULL'):
     """Generates synthetic price data for Stock + SPY."""
@@ -421,7 +467,7 @@ class AdvancedBacktester:
                 mkt_status = analyze_market_regime(self.market_df, current_date)
                 
                 # Signal Generation
-                signal_data = generate_signal(df_window, mkt_status)
+                signal_data = generate_signal(df_window, mkt_status, debug=True)
                 
                 if signal_data['signal'] != 'NONE':
                     # CREATE LIMIT ORDER (Wait for Retest)
@@ -518,8 +564,21 @@ class AdvancedBacktester:
 
 # --- EXECUTION ---
 if __name__ == '__main__':
-    print("Generating 10 years of High-Fidelity Mock Data...")
-    stock_df, market_df = generate_mock_data('MOCK_TECH')
+    # Configuration
+    # use DB defaults from Util if present
+    DB_FILE = getattr(Util, 'DB_FILE', r'C:\Users\jv2mk\OneDrive\Stock\Screener\DB\stage2')
+    TICKER = 'A'  # Change this to your desired ticker
+    TABLE_NAME = getattr(Util, 'TABLE_NAME', 'Historical_SP500')
+    
+    # Load data from SQLite
+    print(f"Loading {TICKER} data from SQLite database...")
+    try:
+        stock_df, market_df = load_data_from_sqlite(DB_FILE, TICKER, TABLE_NAME)
+        print(f"✓ Loaded {len(stock_df)} trading days for {TICKER}")
+    except Exception as e:
+        print(f"✗ Error loading from SQLite: {e}")
+        print("Falling back to mock data...")
+        stock_df, market_df = generate_mock_data('MOCK_TECH')
     
     print("Running Backtest...")
     bt = AdvancedBacktester(stock_df, market_df)

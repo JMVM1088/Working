@@ -3,19 +3,20 @@ Pattern Backtest
 - Detects Cup & Handle and Bullish Rectangle patterns on daily Close prices
 - Uses similar execution, sizing and risk rules as `Triangle_Advance.py` for backtesting
 
-Usage: run the script directly. By default it uses the mock data generator
-from `Triangle_Advance.py`. To use real data, edit the `USE_REAL_DATA` flag
-or call `fetch_real_data(symbol)` (helper available in `Triangle_Advance.py`).
+Usage: run the script directly. By default it loads data from SQLite. 
+To use real data, set USE_REAL_DATA = True or call `fetch_real_data(symbol)`.
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import os
 
 # Reuse helpers and constants from Triangle_Advance
 from Triangle_Advance import (
     calculate_technical_indicators,
     generate_mock_data,
+    load_data_from_sqlite,
     fetch_real_data,
     analyze_market_regime,
     ATR_PERIOD,
@@ -23,6 +24,7 @@ from Triangle_Advance import (
     TP_RR_RATIO,
     MAX_HOLD_DAYS,
 )
+from pattern_analysis import analyze_pattern, load_stock_and_market_from_sqlite, AlgorithmType
 
 # Parameters for pattern detection
 CUP_MIN_LEN = 40
@@ -305,29 +307,56 @@ class PatternBacktester:
 
 
 if __name__ == '__main__':
-    # Toggle data source
+    # Configuration
+    DB_FILE = r'C:\Users\jv2mk\OneDrive\Stock\Screener\DB\stage2'
+    TICKER = 'AAPL'  # Change this to your desired ticker
+    TABLE_NAME = 'HistoricalPrices'
     USE_REAL_DATA = False
-    SYMBOL = 'MOCK_TECH'
 
+    # Load data
     if USE_REAL_DATA:
-        stock_df, market_df = fetch_real_data('AAPL', years=10)
+        print(f"Fetching real data for {TICKER}...")
+        stock_df, market_df = fetch_real_data(TICKER, years=10)
     else:
-        print('Generating mock data...')
-        stock_df, market_df = generate_mock_data(SYMBOL)
+        print(f"Loading {TICKER} data from SQLite database...")
+        try:
+            stock_df, market_df = load_stock_and_market_from_sqlite(DB_FILE, TICKER, TABLE_NAME)
+            print(f"✓ Loaded {len(stock_df)} trading days for {TICKER}")
+        except Exception as e:
+            print(f"✗ Error loading from SQLite: {e}")
+            print("Falling back to mock data...")
+            stock_df, market_df = generate_mock_data('MOCK_TECH')
 
     # Prepare data
     stock_df = calculate_technical_indicators(stock_df)
 
-    # Detect patterns
-    print('Detecting Cup & Handle patterns...')
-    cups = detect_cup_and_handle(stock_df)
-    print(f'Found {len(cups)} cup & handle signals')
+    # Detect patterns using analyze_pattern over rolling anchors
+    signals = []
+    lookback_days = 120
+    pivot_window = 5
+    algo_type = AlgorithmType.ENHANCED
 
-    print('Detecting Bullish Rectangle patterns...')
-    rects = detect_bullish_rectangle(stock_df)
-    print(f'Found {len(rects)} rectangle signals')
+    all_dates = list(stock_df.index)
+    # start from lookback_days to ensure enough history
+    for idx in range(lookback_days - 1, len(all_dates)):
+        anchor = all_dates[idx]
+        res = analyze_pattern(stock_df.reset_index(), anchor.strftime('%Y-%m-%d'), lookback_days=lookback_days, algo_type=algo_type, pivot_window=pivot_window)
+        if res.get('found'):
+            # compute entry price from resistance line at relative index
+            res_line = res.get('resistanceLine', {})
+            start_idx = int(res_line.get('startIdx', idx - (lookback_days - 1)))
+            anchor_idx = int(res_line.get('endIdx', idx))
+            rel_idx = anchor_idx - start_idx
+            slope = float(res_line.get('slope', 0.0))
+            intercept = float(res_line.get('intercept', 0.0))
+            entry_price = slope * rel_idx + intercept
+            signals.append({'date': anchor, 'entry_price': float(entry_price), 'type': 'pattern'})
 
-    signals = cups + rects
+    # deduplicate signals by date
+    unique = {}
+    for s in signals:
+        unique.setdefault(s['date'], s)
+    signals = list(unique.values())
     print(f'Total pattern signals: {len(signals)}')
 
     # Run backtest using same execution rules
