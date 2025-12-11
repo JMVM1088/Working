@@ -47,6 +47,33 @@ def get_prices(ticker,interval=10):
    
     return df
 
+def get_prices_range(ticker,startDate, endDate):
+
+    print(f"Fetching data for {ticker} from {startDate} to {endDate}...")
+    stock = yf.Ticker(ticker)
+    try:
+        df = stock.history(start=startDate,
+                        end=endDate,
+                        interval='1d',auto_adjust=False)
+    except yf.exceptions.YFRateLimitError:
+        print(f"Rate limited for {ticker}. Waiting...")
+        time.sleep(300)  # Wait for 60 seconds before retrying
+        df = stock.history(start=startDate,
+                        end=endDate,
+                        interval='1d',auto_adjust=False)
+        time.sleep(5)  # Add a small delay between each ticker request            
+    if not df.empty:
+        df = convert_date_format(df)
+        df['Ticker'] = ticker
+        # Use only standard columns for SQL insert (add more if your table has them)
+        fields = ['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Adj Close','Volume', 'Dividends', 'Stock Splits']
+        for col in fields:
+            if col not in df.columns:
+                df[col] = None
+        df = df[fields]
+   
+    return df
+
 def create_table_if_not_exists(conn):
     create_sql = f'''
         CREATE TABLE IF NOT EXISTS {TABLE_NAME} (

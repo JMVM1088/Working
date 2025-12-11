@@ -24,7 +24,7 @@ def main():
     for ticker in stock_list:
                 df = Util.get_prices(ticker[0], 8)
                 if df is not None and not df.empty:
-                    Util.insert_prices_sql(conn, df, 'Historical_US')
+                    Util.insert_prices_sql(conn, df, 'AI_Historical')
         
     conn.close()
     # Print the complete datetime object
