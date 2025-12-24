@@ -13,18 +13,35 @@ connection_string = (
         r'DATABASE=Stock;' # Replace with your database name
         r'Trusted_Connection=yes;'
     )
-
-def main():    
+def getDailyPrice(stockType, destTable, lookbackDays):    
     # Get the current date and time
     Start_datetime = datetime.now()
     conn = pyodbc.connect(connection_string)
     ##stock_list = list(Util.get_data_from_sql(connection_string, f"SELECT symbol FROM [Stock].[dbo].[StockList_US]"))
-    stock_list = list(Util.get_data_from_sql(connection_string, "exec stock..sp_GetStockList"))
+    stock_list = list(Util.get_data_from_sql(connection_string, f"exec stock..sp_GetStockList '{stockType}'"))
+
+    for ticker in stock_list:
+                df = Util.get_prices(ticker[0], lookbackDays)
+                if df is not None and not df.empty:
+                    Util.insert_prices_sql(conn, df, f'{destTable}')
+        
+    conn.close()
+    # Print the complete datetime object
+    print("Start date and time:", Start_datetime)
+    print("End date and time:", datetime.now())
+    print("✅ All data inserted into the database.")    
+
+def main(stockType, destTable):    
+    # Get the current date and time
+    Start_datetime = datetime.now()
+    conn = pyodbc.connect(connection_string)
+    ##stock_list = list(Util.get_data_from_sql(connection_string, f"SELECT symbol FROM [Stock].[dbo].[StockList_US]"))
+    stock_list = list(Util.get_data_from_sql(connection_string, f"exec stock..sp_GetStockList"))
 
     for ticker in stock_list:
                 df = Util.get_prices(ticker[0], 8)
                 if df is not None and not df.empty:
-                    Util.insert_prices_sql(conn, df, 'AI_Historical')
+                    Util.insert_prices_sql(conn, df, 'AI_Stock_Historical')
         
     conn.close()
     # Print the complete datetime object

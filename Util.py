@@ -178,6 +178,31 @@ def get_data_from_sql(conStr, query, params=None):
         if conn:
             conn.close()    
 
+def sql_execute_query(conStr, query, params=None):
+    conn = None
+    try:
+        conn = pyodbc.connect(conStr, autocommit=True) # Set autocommit to True
+        cursor = conn.cursor()
+
+        # SQL command to execute the stored procedure
+        sql_command = f"EXEC {query}"
+
+        # Execute the stored procedure
+        cursor.execute(sql_command)
+
+        # Close the cursor and connection
+        cursor.close()
+        conn.close()
+
+        print(f"Stored procedure '{query}' executed successfully with no return value.")
+
+    except pyodbc.Error as ex:
+        sqlstate = ex.args[0]
+        if sqlstate == '23000':
+            print("Error: Stored procedure execution failed due to a constraint violation or other database error.")
+        else:
+            print(f"An error occurred: {ex}")
+
 def insert_prices_sql(conn, df,table_name):
     cursor = conn.cursor()
     for _, row in df.iterrows():
