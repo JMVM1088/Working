@@ -17,7 +17,7 @@ connection_string = (
         r'Trusted_Connection=yes;'
     )
 # Folder Configuration
-CSV_FOLDER = r"C:\Users\jv2mk\OneDrive\Stock\HistoricalData_AI\ETF_1"  # Path to CSV folder
+CSV_FOLDER = r"C:\Data"  # Path to CSV folder
 BACKUP_SUBFOLDER = "Bkp"  # Subfolder name for moved files
 
 # Table Configuration

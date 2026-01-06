@@ -1,0 +1,26 @@
+import numpy as np
+
+class EnsembleEngine:
+    def __init__(self, threshold=0.4, risk_per_trade=0.01):
+        self.threshold = threshold
+        self.risk_per_trade = risk_per_trade
+
+    def generate_signals(self, df):
+        # Scoring Logic
+        s1 = np.where(df['RSI'] < 30, 1, np.where(df['RSI'] > 70, -1, 0))
+        s2 = np.where(df['MACD'] > df['MACD_Sig'], 1, -1)
+        s3 = np.where(df['ROC'] > 0, 1, -1)
+        s4 = np.where(df['Stoch'] < 20, 1, np.where(df['Stoch'] > 80, -1, 0))
+        s5 = np.where(df['MA_Slope'] > 0, 1, -1)
+
+        df['Ensemble_Score'] = (s1 + s2 + s3 + s4 + s5) / 5
+        
+        # Apply Conviction Threshold (Dead Zone)
+        df['Final_Score'] = np.where(abs(df['Ensemble_Score']) >= self.threshold, df['Ensemble_Score'], 0)
+        
+        # Volatility Adjusted Size: Risk / ATR
+        # We normalize by Close price to get a percentage-based weight
+        df['Vol_Adj_Weight'] = (df['Close'] * self.risk_per_trade) / df['ATR']
+        df['Position_Size'] = df['Final_Score'] * df['Vol_Adj_Weight'].clip(0, 2) # Limit leverage to 2x
+        
+        return df

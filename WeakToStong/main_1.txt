@@ -1,0 +1,69 @@
+import pandas as pd
+from data_loader import DataLoader
+from indicators import Indicators
+from engine import EnsembleEngine
+from backtester import Backtester
+import matplotlib.pyplot as plt
+from sqlalchemy import create_engine, text
+
+# --- Configuration ---
+SQL_CONFIG = {
+    "server": "YOUR_SERVER_NAME",
+    "database": "TradingDB",
+    "symbols": ["SPY", "QQQ", "IWM", "AAPL", "TSLA"],
+    "output_table": "StrategyScores"
+}
+
+def save_scores_to_sql(df, symbol, config):
+    """
+    Saves the latest signal scores to the SQL database.
+    """
+    # We only want to save the most recent row (today's signal)
+    latest_signal = df.iloc[[-1]].copy()
+    latest_signal['Symbol'] = symbol
+    latest_signal['ReportDate'] = latest_signal.index
+    
+    # Select only the columns we want to track
+    output_cols = ['ReportDate', 'Symbol', 'Ensemble_Score', 'Final_Score', 'Regime', 'Position_Size']
+    data_to_save = latest_signal[output_cols]
+    
+    # Connection string for writing
+    conn_str = f"mssql+pyodbc://{config['server']}/{config['database']}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+    engine = create_engine(conn_str)
+    
+    # Append the result to the table
+    data_to_save.to_sql(config['output_table'], engine, if_exists='append', index=False)
+    print(f">>> Saved signals for {symbol} to {config['output_table']}")
+
+# --- Main Execution Loop ---
+def main():
+    loader = DataLoader(server=SQL_CONFIG["server"], database=SQL_CONFIG["database"])
+    engine = EnsembleEngine(threshold=0.4, risk_per_trade=0.02)
+    tester = Backtester(fee=0.0002)
+
+    for symbol in SQL_CONFIG["symbols"]:
+        try:
+            print(f"\n--- Processing {symbol} ---")
+            
+            # 1. Load Data
+            raw_data = loader.get_ohlc(symbol)
+            if raw_data.empty: continue
+
+            # 2. Calculate Indicators (includes SMA 200)
+            data_with_inds = Indicators.add_all(raw_data)
+
+            # 3. Generate Ensemble Signals & Regime Filter
+            data_with_signals = engine.generate_signals(data_with_inds)
+
+            # 4. Save Latest Score to SQL
+            save_scores_to_sql(data_with_signals, symbol, SQL_CONFIG)
+
+            # 5. Run Backtest (Optional: useful for validation)
+            results, metrics = tester.run(data_with_signals)
+            print(f"Backtest {symbol}: Sharpe {metrics['Sharpe']:.2f}, MaxDD {metrics['MaxDD']:.2%}")
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+
+if __name__ == "__main__":
+    main()

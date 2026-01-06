@@ -1,0 +1,49 @@
+/*
+
+To analyze signal stability, we need to compare two distinct snapshots within the same day. This is a critical "sanity check" for quants: if a signal flips from +1 to -1 in just a few hours, the strategy might be too sensitive to intraday noise.
+
+The Signal Stability Query
+This query uses a Self-Join. It pairs the first run of the day with the last run of the day for every symbol and calculates the "delta" (the change) in the ensemble score.
+
+*/
+
+WITH DailyRuns AS (
+    -- Rank runs by time for each symbol on each day
+    SELECT 
+        Symbol,
+        ReportDate,
+        RunID,
+        Ensemble_Score,
+        ROW_NUMBER() OVER (PARTITION BY Symbol, CAST(ReportDate AS DATE) ORDER BY RunID ASC) as FirstRunRank,
+        ROW_NUMBER() OVER (PARTITION BY Symbol, CAST(ReportDate AS DATE) ORDER BY RunID DESC) as LastRunRank
+    FROM StrategyScores
+),
+RunComparison AS (
+    -- Join the first run to the last run
+    SELECT 
+        f.Symbol,
+        CAST(f.ReportDate AS DATE) as TradeDate,
+        f.RunID as MorningRun,
+        l.RunID as AfternoonRun,
+        f.Ensemble_Score as MorningScore,
+        l.Ensemble_Score as AfternoonScore,
+        ABS(l.Ensemble_Score - f.Ensemble_Score) as ScoreDelta
+    FROM DailyRuns f
+    JOIN DailyRuns l ON f.Symbol = l.Symbol AND CAST(f.ReportDate AS DATE) = CAST(l.ReportDate AS DATE)
+    WHERE f.FirstRunRank = 1  -- The earliest run of the day
+      AND l.LastRunRank = 1   -- The latest run of the day
+      AND f.RunID <> l.RunID  -- Ensure there were at least two runs
+)
+SELECT 
+    Symbol,
+    TradeDate,
+    MorningScore,
+    AfternoonScore,
+    ScoreDelta,
+    CASE 
+        WHEN ScoreDelta >= 0.6 THEN 'High Instability - Warning'
+        WHEN ScoreDelta >= 0.2 THEN 'Moderate Drift'
+        ELSE 'Stable'
+    END as StabilityStatus
+FROM RunComparison
+ORDER BY ScoreDelta DESC;

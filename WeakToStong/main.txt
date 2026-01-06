@@ -1,0 +1,29 @@
+from data_loader import DataLoader
+from indicators import Indicators
+from engine import EnsembleEngine
+from backtester import Backtester
+import matplotlib.pyplot as plt
+
+# 1. Setup
+loader = DataLoader(server="YOUR_SERVER", database="TradingDB")
+engine = EnsembleEngine(threshold=0.4, risk_per_trade=0.02)
+tester = Backtester(fee=0.0002)
+
+# 2. Pipeline
+print("Fetching data...")
+raw_data = loader.get_ohlc("SPY", start_date="2020-01-01")
+
+print("Calculating technicals...")
+data_with_inds = Indicators.add_all(raw_data)
+
+print("Generating ensemble signals...")
+data_with_signals = engine.generate_signals(data_with_inds)
+
+print("Running backtest...")
+results, metrics = tester.run(data_with_signals)
+
+# 3. Output
+print(f"Final Sharpe: {metrics['Sharpe']:.2f}")
+print(f"Max Drawdown: {metrics['MaxDD']:.2%}")
+results['Equity'].plot(title="Ensemble Strategy: Equity Curve")
+plt.show()

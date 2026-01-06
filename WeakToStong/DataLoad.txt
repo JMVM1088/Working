@@ -1,0 +1,18 @@
+import pandas as pd
+from sqlalchemy import create_engine, text
+
+class DataLoader:
+    def __init__(self, server, database, driver="ODBC Driver 17 for SQL Server"):
+        self.conn_str = f"mssql+pyodbc://{server}/{database}?driver={driver}&trusted_connection=yes"
+        self.engine = create_engine(self.conn_str)
+
+    def get_ohlc(self, ticker, start_date=None):
+        query = f"SELECT Date, [Open], [High], [Low], [Close], [Volume] FROM HistoricalPriceData WHERE Ticker = '{ticker}'"
+        if start_date:
+            query += f" AND Date >= '{start_date}'"
+        query += " ORDER BY Date ASC"
+        
+        df = pd.read_sql(text(query), self.engine)
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        return df

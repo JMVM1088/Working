@@ -1,0 +1,85 @@
+import pandas as pd
+from data_loader import DataLoader
+from indicators import Indicators
+from engine import EnsembleEngine
+from backtester import Backtester
+import matplotlib.pyplot as plt
+from sqlalchemy import create_engine
+
+# --- Configuration ---
+SQL_CONFIG = {
+    "server": "YOUR_SERVER_NAME",
+    "database": "TradingDB",
+    # Example list - this could also be fetched from a 'Universe' table in SQL
+    "symbols": ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "MSFT", "NVDA", "GOOGL"],
+    "output_table": "StrategyScores"
+}
+
+def main():
+    # Initialize components
+    loader = DataLoader(server=SQL_CONFIG["server"], database=SQL_CONFIG["database"])
+    engine = EnsembleEngine(threshold=0.4, risk_per_trade=0.02)
+    tester = Backtester(fee=0.0002)
+    
+    # List to store the latest row from each symbol
+    all_latest_signals = []
+
+    for symbol in SQL_CONFIG["symbols"]:
+        try:
+            print(f"Processing {symbol}...")
+            
+            # 1. Load Data
+            raw_data = loader.get_ohlc(symbol)
+            if raw_data.empty:
+                print(f"Skipping {symbol}: No data found.")
+                continue
+
+            # 2. Calculate Indicators (includes SMA 200)
+            data_with_inds = Indicators.add_all(raw_data)
+
+            # 3. Generate Ensemble Signals & Regime Filter
+            data_with_signals = engine.generate_signals(data_with_inds)
+
+            # 4. Extract the latest signal row for bulk storage
+            latest_row = data_with_signals.iloc[[-1]].copy()
+            latest_row['Symbol'] = symbol
+            latest_row['ReportDate'] = latest_row.index
+            all_latest_signals.append(latest_row)
+
+            # 5. Optional: Run Backtest validation for the console
+            _, metrics = tester.run(data_with_signals)
+            print(f"  > {symbol} Sharpe: {metrics['Sharpe']:.2f}")
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+
+    # --- 6. Perform Bulk Insert ---
+    if all_latest_signals:
+        print("\nPreparing bulk insert to SQL Server...")
+        
+        # Combine all individual rows into one master DataFrame
+        final_upload_df = pd.concat(all_latest_signals)
+        
+        # Filter for the columns defined in our SQL schema
+        output_cols = ['ReportDate', 'Symbol', 'Ensemble_Score', 'Final_Score', 'Regime', 'Position_Size']
+        final_upload_df = final_upload_df[output_cols]
+
+        # Establish connection and write
+        conn_str = f"mssql+pyodbc://{SQL_CONFIG['server']}/{SQL_CONFIG['database']}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+        db_engine = create_engine(conn_str)
+        
+        # Use 'multi' method for faster insertion if supported, or standard to_sql
+        final_upload_df.to_sql(
+            SQL_CONFIG['output_table'], 
+            db_engine, 
+            if_exists='append', 
+            index=False,
+            chunksize=50  # Optimizes memory usage during large inserts
+        )
+        
+        print(f"Successfully inserted {len(final_upload_df)} records into {SQL_CONFIG['output_table']}.")
+    else:
+        print("No signals generated. Database update skipped.")
+
+if __name__ == "__main__":
+    main()

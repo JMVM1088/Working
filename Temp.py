@@ -15,11 +15,12 @@ now = datetime.now()
 current_time = now.time()
 
 # Define 6 pm time object (18:00 in 24-hour format)
-six_pm = time(18, 0, 0)
+six_pm = time(11, 0, 0)
 
 # Check if it's a weekday (Monday=0 to Friday=4)
-is_weekday = now.weekday() <= 4
 
+is_weekday = 0
+is_weekday = 0 <= 4
 if is_weekday:
     print(f"Today is a weekday ({now.strftime('%A')}).")
     if current_time > six_pm:

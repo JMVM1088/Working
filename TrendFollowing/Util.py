@@ -327,12 +327,6 @@ def getDailyPrice(connStr,stockType, destTable, lookbackDays,PriceType ):
     print("Start date and time:", Start_datetime)
     print("End date and time:", datetime.now())
     #print("All data inserted into the database.")    
-
-def get_data(engine, table, dateField, ticker, start, end):
-    query = f"SELECT {dateField} as Date, [Open], [High], [Low], [Close], [Volume] FROM {table} WHERE Symbol = '{ticker}' AND {dateField} <= '{end}' ORDER BY Date ASC"
-    df = pd.read_sql(query, engine)
-    df['Date'] = pd.to_datetime(df['Date'])
-    return df
 # def main():
 #     #stock_list = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA','SPY','QQQ','SOXX','LEU']  # Edit as needed
 

@@ -1,0 +1,54 @@
+WITH SignalAnalysis AS (
+    SELECT 
+        s.ReportDate,
+        s.Symbol,
+        s.FinalScore,
+        s.PositionSize,
+        p_today.Close AS EntryPrice,
+        LEAD(p_today.Close, 1) OVER (PARTITION BY s.Symbol ORDER BY s.ReportDate) AS ExitPrice
+    FROM 
+        StrategyScores s
+    JOIN 
+        HistoricalPriceData p_today ON s.Symbol = p_today.Symbol 
+        AND s.ReportDate = p_today.Date
+),
+TradePerformance AS (
+    SELECT 
+        *,
+        -- Standardized PnL: (Price Change / Entry) * PositionSize * NotionalValue ($10,000)
+        ((ExitPrice - EntryPrice) / EntryPrice) * PositionSize * 10000 AS TradePnL
+    FROM 
+        SignalAnalysis
+    WHERE 
+        ExitPrice IS NOT NULL
+)
+SELECT 
+    ReportDate,
+    Symbol,
+    FinalScore,
+    ROUND(TradePnL, 2) AS DailyPnL,
+    -- The "Cumulative Profit" Window Function
+    ROUND(SUM(TradePnL) OVER (PARTITION BY Symbol ORDER BY ReportDate), 2) AS CumulativeProfit,
+    -- Hit Rate Logic
+    CASE 
+        WHEN (FinalScore > 0 AND ExitPrice > EntryPrice) OR (FinalScore < 0 AND ExitPrice < EntryPrice) THEN 1 
+        ELSE 0 
+    END AS IsHit
+FROM 
+    TradePerformance
+ORDER BY 
+    Symbol, 
+    ReportDate;
+	
+	
+	
+--================================================================
+-- Leaderboard Query
+SELECT 
+    Symbol,
+    SUM(TradePnL) AS TotalProfit,
+    COUNT(*) AS TotalTrades,
+    AVG(TradePnL) AS ExpectedValuePerTrade
+FROM TradePerformance
+GROUP BY Symbol
+ORDER BY TotalProfit DESC;

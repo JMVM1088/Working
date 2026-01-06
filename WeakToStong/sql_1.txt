@@ -1,0 +1,8 @@
+CREATE TABLE StrategyScores (
+    ReportDate DATETIME,
+    Symbol VARCHAR(10),
+    EnsembleScore FLOAT,
+    FinalScore FLOAT,
+    Regime INT,
+    PositionSize FLOAT
+);

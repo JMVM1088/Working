@@ -1,0 +1,43 @@
+WITH SignalAnalysis AS (
+    SELECT 
+        s.ReportDate,
+        s.Symbol,
+        s.FinalScore,
+        s.Regime,
+        p_today.Close AS EntryPrice,
+        -- Fetch the price from the NEXT available trading day for that symbol
+        LEAD(p_today.Close, 1) OVER (PARTITION BY s.Symbol ORDER BY s.ReportDate) AS ExitPrice
+    FROM 
+        StrategyScores s
+    JOIN 
+        HistoricalPriceData p_today ON s.Symbol = p_today.Symbol 
+        AND s.ReportDate = p_today.Date
+),
+CalculatedReturns AS (
+    SELECT 
+        *,
+        (ExitPrice - EntryPrice) / EntryPrice AS NextDayReturn,
+        CASE 
+            WHEN FinalScore > 0 AND (ExitPrice > EntryPrice) THEN 1  -- Correct Long
+            WHEN FinalScore < 0 AND (ExitPrice < EntryPrice) THEN 1  -- Correct Short
+            WHEN FinalScore = 0 THEN NULL                            -- Ignored (No Trade)
+            ELSE 0                                                   -- Wrong Prediction
+        END AS IsHit
+    FROM 
+        SignalAnalysis
+    WHERE 
+        ExitPrice IS NOT NULL -- Exclude the most recent day as we don't know the outcome yet
+)
+-- Final Summary Statistics
+SELECT 
+    Symbol,
+    COUNT(IsHit) AS TotalTrades,
+    SUM(IsHit) AS TotalHits,
+    ROUND(CAST(SUM(IsHit) AS FLOAT) / COUNT(IsHit) * 100, 2) AS HitRatePercentage,
+    ROUND(AVG(NextDayReturn) * 100, 4) AS AvgReturnPerTradePct
+FROM 
+    CalculatedReturns
+GROUP BY 
+    Symbol
+ORDER BY 
+    HitRatePercentage DESC;

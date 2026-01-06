@@ -1,0 +1,74 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sqlalchemy import create_engine, text
+
+# --- 1. SQL Configuration ---
+SQL_CONFIG = {
+    "driver": "ODBC Driver 17 for SQL Server",
+    "server": "YOUR_SERVER_NAME",
+    "database": "TradingData",
+    "table": "HistoricalPriceData",
+    "ticker": "SPY"
+}
+
+def get_data_from_sql(config):
+    """
+    Retrieves OHLC data from SQL Server and formats it for the backtester.
+    """
+    # Create Connection String
+    conn_str = (
+        f"mssql+pyodbc://{config['server']}/{config['database']}?"
+        f"driver={config['driver']}&trusted_connection=yes"
+    )
+    
+    engine = create_engine(conn_str)
+    
+    # Query logic (assuming columns: Date, Open, High, Low, Close, Volume)
+    query = f"""
+    SELECT Date, Open, High, Low, Close, Volume 
+    FROM {config['table']} 
+    WHERE Ticker = '{config['ticker']}'
+    ORDER BY Date ASC
+    """
+    
+    with engine.connect() as conn:
+        df = pd.read_sql(text(query), conn)
+    
+    # Ensure Date is index and numeric types are correct
+    df['Date'] = pd.to_datetime(df['Date'])
+    df.set_index('Date', inplace=True)
+    return df
+
+# --- 2. Quantitative Logic (Indicators & Scoring) ---
+# [Note: calculate_indicators and generate_scores remain the same as the previous response]
+
+def calculate_indicators(df):
+    # RSI, MACD, ROC, Stoch, MA_Slope calculations...
+    # (Refer to the previous code block for the full math logic)
+    pass 
+
+# --- 3. Main Execution Flow ---
+try:
+    # Retrieve data from your database
+    data = get_data_from_sql(SQL_CONFIG)
+    
+    if data.empty:
+        print("No data retrieved. Check your SQL query and table names.")
+    else:
+        # Run the quantitative pipeline
+        data = calculate_indicators(data)
+        data = generate_scores(data)
+        
+        # Split and Backtest
+        split = int(len(data) * 0.7)
+        test_df = data.iloc[split:].copy()
+        
+        # (Assuming run_backtest function from previous step)
+        results, sharpe, mdd = run_backtest(test_df)
+        
+        print(f"Backtest complete for {SQL_CONFIG['ticker']}")
+        print(f"Sharpe: {sharpe:.2f} | Max DD: {mdd:.2%}")
+
+except Exception as e:
+    print(f"Database Connection Error: {e}")

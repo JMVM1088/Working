@@ -1,0 +1,1 @@
+ALTER TABLE StrategyScores ADD RunID VARCHAR(20);

@@ -1,0 +1,135 @@
+import pandas as pd
+from sqlalchemy import create_engine
+from datetime import date
+import re
+from pathlib import Path
+import shutil
+
+# --- CONFIG ---
+CSV_PATH = "Stage-2_2025-12-23.csv"  # path to your CSV
+TABLE_NAME = "Stage2"            # target table name
+# xCONN_STR = (
+#         r'DRIVER={ODBC Driver 17 for SQL Server};'
+#         r'SERVER=BEELINK;'  # Replace with your server name
+#         r'DATABASE=Stock;' # Replace with your database name
+#         r'Trusted_Connection=yes;'
+#     )
+CONN_STR = "mssql+pyodbc://localhost/Stock?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+# Mapping from source CSV header -> destination table columns
+COLUMN_MAP = {
+    "BusinessDate": "BusinessDate",
+    "Symbol": "Symbol",
+    "Description": "Desc",
+    "Price": "Price",
+    "Price - Currency": "Price_Currency",
+    "Simple Moving Average (20) 1 day": "SMA_20",
+    "Simple Moving Average (50) 1 day": "SMA_50",
+    "Simple Moving Average (200) 1 day": "SMA_200",
+    "Candlestick Pattern 1 day": "Candlestick_Pattern",
+    "Country or region of registration": "Country_or_region_of_registration",
+    "Free float": "Free_float",
+    "Sector": "Sector",
+    "Bollinger Bands (20) 1 day, Upper": "BBands_20_Upper",
+    "Bollinger Bands (20) 1 day, Lower": "BBands_20_Lower",
+    "Volume Weighted Average Price 1 day": "Volume_Weighted_Average_Price_1",
+    "Volume Weighted Moving Average (20) 1 day": "Volume_Weighted_Moving_Average_20",
+    "Relative Strength Index (14) 1 day": "RSIndex_14",
+    "Relative Strength Index (7) 1 day": "RSIndex_7",
+}
+DEST_COLUMNS = [
+    "BusinessDate",
+    "Symbol",
+    "Desc",
+    "Price",
+    "Price_Currency",
+    "SMA_20",
+    "SMA_50",
+    "SMA_200",
+    "Candlestick_Pattern",
+    "Country_or_region_of_registration",
+    "Free_float",
+    "Sector",
+    "BBands_20_Upper",
+    "BBands_20_Lower",
+    "Volume_Weighted_Average_Price_1",
+    "Volume_Weighted_Moving_Average_20",
+    "RSIndex_14",
+    "RSIndex_7",
+]
+
+# ---------------
+
+def load_csv_to_sql(sFullPathFileName, sFileName, sTableName):
+    # Read CSV with proper handling of commas in quoted fields (Description, etc.) [file:1]
+    df = pd.read_csv(
+        sFullPathFileName,
+        dtype=str,
+        keep_default_na=False
+    )
+
+    # Extract date from filename and set BusinessDate
+    m = re.search(r"\d{4}-\d{2}-\d{2}", sFileName)  # yyyy-mm-dd [web:3]
+    if not m:
+        raise ValueError(f"No yyyy-mm-dd date found in file name: {CSV_PATH}")
+    df["BusinessDate"] = m.group(0)
+
+    # Rename columns to match destination schema
+    df = df.rename(columns=COLUMN_MAP)
+
+    # Reorder / restrict to destination columns
+    df = df[DEST_COLUMNS]
+
+    # Create SQLAlchemy engine
+    engine = create_engine(CONN_STR)
+
+    # Write to SQL
+    df.to_sql(
+        sTableName,
+        con=engine,
+        if_exists="append",   # change to 'append' once table exists
+        index=False
+    )
+
+def process_stage2_files(
+    input_dir: str,
+    archive_dir: str,
+    pattern: str = "Stage 2_*"
+) -> None:
+    """
+    Loop through input_dir, find files matching pattern (e.g. 'Stage_2*'),
+    run processing logic, then move each processed file to archive_dir.
+    """
+
+    in_path = Path(input_dir)
+    arc_path = Path(archive_dir)
+
+    # Ensure archive directory exists
+    arc_path.mkdir(parents=True, exist_ok=True)
+
+    # Iterate over matching files, non-recursive
+    for file_path in in_path.glob(pattern):  # glob pattern match [web:24][web:37]
+        if not file_path.is_file():
+            continue
+
+        # --- Your processing logic goes here ---
+        load_csv_to_sql(f"{in_path/file_path.name}", file_path.name, "Stage2")
+        # do_something_with(file_path)
+
+        # --- Move file to archive folder ---
+        # Example placeholder: print file name, or call your own function
+        print(f"Processing: {in_path/file_path.name}")
+        # do_something_with(file_path)
+
+        # --- Move file to archive folder ---
+        dest = arc_path / file_path.name
+        shutil.move(str(file_path), str(dest))  # move like Unix mv [web:27][web:39]
+        print(f"Archived to: {dest}")
+
+
+if __name__ == "__main__":
+    process_stage2_files(
+        input_dir=r"C:\Users\jv2mk\Downloads", 
+        archive_dir=r"C:\Users\jv2mk\OneDrive\Stock\Screener\archive"
+    )
+    #m = re.search(r"\d{4}-\d{2}-\d{2}", CSV_PATH)  # match yyyy-mm-dd [web:3]
+    #load_csv_to_sql()

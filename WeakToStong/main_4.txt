@@ -1,0 +1,25 @@
+## Add to main or dataload
+def get_last_score(symbol, config):
+    """
+    Queries SQL for the most recent Final_Score for a specific symbol.
+    """
+    conn_str = f"mssql+pyodbc://{config['server']}/{config['database']}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
+    engine = create_engine(conn_str)
+    
+    query = f"""
+    SELECT TOP 1 Final_Score 
+    FROM {config['output_table']} 
+    WHERE Symbol = '{symbol}' 
+    ORDER BY RunID DESC
+    """
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(query)).fetchone()
+            return result[0] if result else None
+    except:
+        return None
+
+# --- In the main loop of main.py ---
+for symbol in SQL_CONFIG["symbols"]:
+    last_score = get_last_score(symbol, SQL_CONFIG)
+    data_with_signals = engine.generate_signals(data_with_inds, last_run_score=last_score)
