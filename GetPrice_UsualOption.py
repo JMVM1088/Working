@@ -227,9 +227,9 @@ def process_stage2_files(
 
 
 if __name__ == "__main__":
-    engine = create_engine(CONN_STR)
-    with engine.begin() as conn:
-        conn.execute(text("EXEC sp_UsualOptions_CleanUp"))
+    # engine = create_engine(CONN_STR)
+    # with engine.begin() as conn:
+    #     conn.execute(text("EXEC sp_UsualOptions_CleanUp"))
   
     process_stage2_files(
         input_dir=r"C:\Users\jv2mk\Downloads", 
