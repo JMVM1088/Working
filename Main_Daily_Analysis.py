@@ -34,7 +34,7 @@ ENGINE_STR = (
     "mssql+pyodbc://@BEELINK/Stock"
     "?driver=ODBC Driver 17 for SQL Server&trusted_connection=yes"
 )
-PERPLEXITY_API_KEY = "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"
+PERPLEXITY_API_KEY = " "
 UNUSUAL_OPTIONS_TABLE = "dbo.UsualOptions"  # Your table
 
 engine = create_engine(ENGINE_STR)
