@@ -3,7 +3,7 @@ import numpy as np
 import datetime
 from sqlalchemy import create_engine, text
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION ---   
 DB_URL = "mssql+pyodbc://@BEELINK/Stock?driver=ODBC Driver 17 for SQL Server&trusted_connection=yes"
 engine = create_engine(DB_URL)
 
