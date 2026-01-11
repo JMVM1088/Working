@@ -2,7 +2,7 @@ import Util as u
 from datetime import datetime, time 
 
 
-# Define the connection string
+# Define the connection string         
 conStr = (
         r'DRIVER={ODBC Driver 17 for SQL Server};'
         r'SERVER=BEELINK;'  # Replace with your server name
