@@ -81,6 +81,7 @@ def setup_logger(name, log_file, level=logging.INFO):
     return logger
 
 if __name__ == "__main__":
+    print(os.environ["DEBUSSY"])
     # Check if a filename was passed as an argument
     logFile = r"C:\Trading\Logs\mylog.txt"
     logger = setup_logger(__name__, logFile, level=logging.DEBUG)
