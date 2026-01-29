@@ -10,19 +10,19 @@ engine = create_engine(DB_URL)
 def fetch_market_data():
     """Fetch 300 days of history to satisfy all look-back periods."""
     query = """
-    SELECT Symbol, [time], [open], [high], [low], [close], [Volume]
+    SELECT Symbol, [TradeDate] as [Time], [open], [high], [low], [close], [Volume]
     FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY [time] DESC) as rn
-        FROM [dbo].[AI_stock_prices]
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY [TradeDate] DESC) as rn
+        FROM [dbo].[AI_ETF_prices]
     ) t
-    WHERE rn <= 300 
-    ORDER BY Symbol, [time] ASC
+    WHERE rn <= 600 
+    ORDER BY Symbol, [TradeDate] ASC
     """
     return pd.read_sql(query, engine)
 
 def compute_indicators(df):
     # Ensure data is sorted for time-series integrity
-    df = df.sort_values(['Symbol', 'time'])
+    df = df.sort_values(['Symbol', 'Time'])
     group = df.groupby('Symbol')
     
     # 1. SMAs (Short, Mid, Long)
@@ -162,7 +162,7 @@ def main():
     final_df = generate_signals(processed_df)
     
     # Extract only the latest date to append to the permanent table
-    latest_date = final_df['time'].max()
+    latest_date = final_df['Time'].max()
 
     #---------------------------------
     # daily_batch = final_df[final_df['time'] == latest_date].copy()
@@ -172,13 +172,14 @@ def main():
     #                 'BB_Upper_10', 'BB_Lower_10', 'BB_Upper_20', 'BB_Lower_20',
     #                 'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags']
     
-    # daily_batch[cols_to_save].to_sql("AI_stock_indicators", engine, if_exists='append', index=False)
+    # daily_batch[cols_to_save].to_sql("AI_ETF_indicators", engine, if_exists='append', index=False)
     #------------------------
     # --- Data Sanitization Block ---
     # 1. Replace Infinity with NaN
-    daily_batch = final_df[final_df['time'] == latest_date].copy()
+    daily_batch = final_df[final_df['Time'] == latest_date].copy()
+    #daily_batch = final_df
     daily_batch = daily_batch.replace([np.inf, -np.inf], np.nan)
-    cols_to_save = ['Symbol', 'time', 'SMA_5', 'SMA_10', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200',
+    cols_to_save = ['Symbol', 'Time', 'SMA_5', 'SMA_10', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200',
                      'BB_Upper_10', 'BB_Lower_10', 'BB_Upper_20', 'BB_Lower_20',
                      'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags']
     # 2. Fill NaN with None (SQLAlchemy treats None as SQL NULL)
@@ -193,7 +194,7 @@ def main():
         daily_batch[col] = np.clip(daily_batch[col], -1.79e308, 1.79e308)
 
     # Now proceed to upload
-    daily_batch[cols_to_save].to_sql("AI_stock_indicators", engine, if_exists='append', index=False, chunksize=50)
+    daily_batch[cols_to_save].to_sql("AI_ETF_indicators", engine, if_exists='append', index=False, chunksize=50)
 
 
 

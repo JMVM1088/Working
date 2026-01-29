@@ -1,0 +1,997 @@
+"""
+TradeBlog Database Implementation with Mibian Greeks Engine
+Author: Trading System
+Date: 2026-01-22
+Purpose: Professional iron condor trade tracking with automated Greeks calculation
+"""
+
+import os
+import pyodbc
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+from dotenv import load_dotenv
+import yfinance as yf
+import mibian
+import json
+from pathlib import Path
+
+load_dotenv()
+
+
+# ============================================================================
+# GREEKS ENGINE (Mibian + yfinance)
+# ============================================================================
+
+class GreeksEngine:
+    """
+    Central engine for SPY option Greeks calculation using mibian + yfinance.
+    Fetches spot price and option chain from yfinance, computes Greeks via mibian.
+    """
+
+    def __init__(self, symbol: str = "SPY", risk_free_rate: float = 0.05):
+        """
+        Args:
+            symbol: Underlying ticker (default SPY)
+            risk_free_rate: Annual risk-free rate as decimal (e.g., 0.05 = 5%)
+        """
+        self.symbol = symbol
+        self.r = risk_free_rate
+
+    def _get_spot(self) -> float:
+        """Get latest SPY spot price from yfinance."""
+        ticker = yf.Ticker(self.symbol)
+        hist = ticker.history(period="1d")
+        if hist.empty:
+            raise ValueError(f"Could not fetch price for {self.symbol}")
+        return float(hist["Close"][-1])
+
+    def _get_chain(self, expiry: str):
+        """Get option chain for given expiry from yfinance."""
+        ticker = yf.Ticker(self.symbol)
+        try:
+            chain = ticker.option_chain(expiry)
+            return chain
+        except Exception as e:
+            raise ValueError(f"Could not fetch option chain for {expiry}: {str(e)}")
+
+    def _get_mid_price(self, df, strike: float) -> float:
+        """Extract mid price from option chain row."""
+        row = df[df["strike"] == strike]
+        if row.empty:
+            raise ValueError(f"No option found for strike {strike}")
+        row = row.iloc[0]
+        bid = float(row.get("bid", 0.0) or 0.0)
+        ask = float(row.get("ask", 0.0) or 0.0)
+        last = float(row.get("lastPrice", 0.0) or 0.0)
+
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        elif last > 0:
+            return last
+        else:
+            # Fallback: use ask if bid/last missing
+            return ask if ask > 0 else bid
+
+    def _days_to_expiry(self, expiry_str: str) -> int:
+        """Calculate calendar days to expiry."""
+        expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d")
+        days = (expiry_dt - datetime.now()).days
+        return max(1, days)
+
+    def get_option_greeks(
+        self, expiry: str, strike: float, option_type: str = "call"
+    ) -> Dict:
+        """
+        Compute Greeks for one option leg using mibian.
+
+        Args:
+            expiry: Expiration date as 'YYYY-MM-DD'
+            strike: Strike price
+            option_type: 'call' or 'put'
+
+        Returns:
+            Dict with: type, spot, strike, expiry, days_to_expiry, iv, delta, gamma, theta, vega
+        """
+        S = self._get_spot()
+        T_days = self._days_to_expiry(expiry)
+        r_percent = self.r * 100
+
+        chain = self._get_chain(expiry)
+
+        if option_type.lower() == "call":
+            mid = self._get_mid_price(chain.calls, strike)
+            try:
+                iv_model = mibian.BS([S, strike, r_percent, T_days], callPrice=mid)
+                iv = iv_model.impliedVolatility
+            except Exception:
+                iv = 0.25  # Fallback IV if calculation fails
+            
+            bs = mibian.BS([S, strike, r_percent, T_days], iv)
+            return {
+                "type": "call",
+                "spot": S,
+                "strike": strike,
+                "expiry": expiry,
+                "days_to_expiry": T_days,
+                "iv": iv,
+                "delta": bs.callDelta,
+                "gamma": bs.gamma,
+                "theta": bs.callTheta,
+                "vega": bs.vega,
+            }
+        else:
+            mid = self._get_mid_price(chain.puts, strike)
+            try:
+                iv_model = mibian.BS([S, strike, r_percent, T_days], putPrice=mid)
+                iv = iv_model.impliedVolatility
+            except Exception:
+                iv = 0.25  # Fallback IV
+            
+            bs = mibian.BS([S, strike, r_percent, T_days], iv)
+            return {
+                "type": "put",
+                "spot": S,
+                "strike": strike,
+                "expiry": expiry,
+                "days_to_expiry": T_days,
+                "iv": iv,
+                "delta": bs.putDelta,
+                "gamma": bs.gamma,
+                "theta": bs.putTheta,
+                "vega": bs.vega,
+            }
+
+    def get_spy_snapshot(self, expiry: str, put_strike: float, call_strike: float) -> Dict:
+        """
+        Get complete Greeks snapshot for SPY iron condor (short put + short call).
+
+        Args:
+            expiry: Expiration as 'YYYY-MM-DD'
+            put_strike: Short put strike
+            call_strike: Short call strike
+
+        Returns:
+            Dict with spot, iv, days_to_exp, and Greeks for both legs (sign-flipped for shorts)
+        """
+        put_g = self.get_option_greeks(expiry, put_strike, "put")
+        call_g = self.get_option_greeks(expiry, call_strike, "call")
+
+        return {
+            "spot": put_g["spot"],
+            "expiry": expiry,
+            "days_to_expiry": put_g["days_to_expiry"],
+            "put_strike": put_strike,
+            "call_strike": call_strike,
+            "put_iv": put_g["iv"],
+            "call_iv": call_g["iv"],
+            # SHORT Greeks (sign-flipped)
+            "put_delta": -put_g["delta"],
+            "put_gamma": -put_g["gamma"],
+            "put_vega": -put_g["vega"],
+            "put_theta": -put_g["theta"],
+            "call_delta": -call_g["delta"],
+            "call_gamma": -call_g["gamma"],
+            "call_vega": -call_g["vega"],
+            "call_theta": -call_g["theta"],
+            # Combined
+            "total_delta": -put_g["delta"] - call_g["delta"],
+            "total_gamma": -put_g["gamma"] - call_g["gamma"],
+            "total_vega": -put_g["vega"] - call_g["vega"],
+            "total_theta": -put_g["theta"] - call_g["theta"],
+        }
+
+
+# ============================================================================
+# DATABASE CONNECTION
+# ============================================================================
+
+class DatabaseConnection:
+    """Handle SQL Server connection and execution."""
+
+    def __init__(self):
+        self.server = os.getenv("DB_SERVER" )
+        self.database = os.getenv("DB_NAME")
+        self.Trusted_Connection = os.getenv("Trusted_Connection")
+        #self.password = os.getenv("DB_PASSWORD", "")
+        self.connection = None
+
+    def connect(self) -> bool:
+        """Establish SQL Server connection."""
+        try:
+            conn_str = (
+                f"Driver={{ODBC Driver 17 for SQL Server}};"
+                f"Server={self.server};"
+                f"Database={self.database};"
+                f"Trusted_Connection={self.Trusted_Connection};"
+                
+            )
+            self.connection = pyodbc.connect(conn_str)
+            return True
+        except Exception as e:
+            print(f"❌ Connection failed: {str(e)}")
+            return False
+
+    def test_connection(self) -> bool:
+        """Test database connection."""
+        if not self.connect():
+            return False
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT 1")
+            print("✅ Database connection successful!")
+            return True
+        except Exception as e:
+            print(f"❌ Connection test failed: {str(e)}")
+            return False
+
+    def execute_query(self, query: str, params: tuple = ()) -> List[tuple]:
+        """Execute SELECT query."""
+        if not self.connection:
+            self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query, params)
+        return cursor.fetchall()
+
+    def execute_sp(self, sp_name: str, params: tuple = ()) -> List[tuple]:
+        """Execute stored procedure."""
+        if not self.connection:
+            self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(f"EXEC {sp_name} {','.join(['?' for _ in params])}", params)
+        self.connection.commit()
+        return cursor.fetchall()
+
+    def execute_insert_old(self, query: str, params: tuple = ()) -> int:
+        """Execute INSERT and return identity."""
+        if not self.connection:
+            self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query, params)
+        self.connection.commit()
+        return cursor.lastrowid
+    
+    def execute_insert(self, query: str, params: tuple = ()) -> int:
+        """Execute INSERT and return identity using SCOPE_IDENTITY()."""
+        if not self.connection:
+            self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query, params)
+        cursor.execute("SELECT SCOPE_IDENTITY()")  # ← SQL Server native function
+        identity = cursor.fetchone()[0]
+        self.connection.commit()
+        return int(identity) if identity else 0
+
+
+    def execute_update(self, query: str, params: tuple = ()) -> int:
+        """Execute UPDATE."""
+        if not self.connection:
+            self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query, params)
+        self.connection.commit()
+        return cursor.rowcount
+
+    def close(self):
+        """Close connection."""
+        if self.connection:
+            self.connection.close()
+
+
+# ============================================================================
+# TRADEBLOG MANAGER
+# ============================================================================
+
+class TradeBlogManager:
+    """Main interface for TradeBlog operations."""
+
+    def __init__(self):
+        self.db = DatabaseConnection()
+        self.greeks_engine = GreeksEngine(symbol="SPY", risk_free_rate=0.05)
+        self.db.test_connection()
+
+    # ========== BATCH OPERATIONS ==========
+
+    def insert_batch(self, batch_data: Dict) -> int:
+        """
+        Insert new batch (iron condor entry).
+
+        Args:
+            batch_data: Dict with keys:
+                batch_name, entry_date, expiration_date,
+                put_long_strike, put_short_strike,
+                call_short_strike, call_long_strike,
+                entry_price, credit_collected, spread_width,
+                number_of_spreads, entry_iv_rank, entry_vix
+
+        Returns:
+            batch_id (int)
+        """
+        query = """
+            INSERT INTO [dbo].[Trade_Batches] (
+                BatchName, EntryDate, ExpirationDate,
+                PutLongStrike, PutShortStrike,
+                CallShortStrike, CallLongStrike,
+                EntryPrice, CreditCollected, SpreadWidth,
+                NumberOfSpreads, EntryIVRank, EntryVIX,
+                IsActive, RollCount, CreatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, GETDATE())
+        """
+        params = (
+            batch_data["batch_name"],
+            batch_data["entry_date"],
+            batch_data["expiration_date"],
+            batch_data["put_long_strike"],
+            batch_data["put_short_strike"],
+            batch_data["call_short_strike"],
+            batch_data["call_long_strike"],
+            batch_data["entry_price"],
+            batch_data["credit_collected"],
+            batch_data["spread_width"],
+            batch_data["number_of_spreads"],
+            batch_data["entry_iv_rank"],
+            batch_data["entry_vix"],
+        )
+        batch_id = self.db.execute_insert(query, params)
+        print(f"✅ Batch inserted: {batch_data['batch_name']} (ID: {batch_id})")
+        return batch_id
+
+    def get_batch(self, batch_id: int) -> Dict:
+        """Retrieve batch details."""
+        query = "SELECT * FROM [dbo].[Trade_Batches] WHERE BatchID = ?"
+        rows = self.db.execute_query(query, (batch_id,))
+        if not rows:
+            return {}
+        # Convert to dict (basic version; expand if needed)
+        return {"batch_id": rows[0][0], "batch_name": rows[0][1]}
+
+    def get_all_active_batches(self) -> List[Dict]:
+        """Get all active batches."""
+        query = "SELECT BatchID, BatchName FROM [dbo].[Trade_Batches] WHERE IsActive = 1"
+        rows = self.db.execute_query(query)
+        return [{"batch_id": r[0], "batch_name": r[1]} for r in rows]
+
+    def close_batch(self, batch_id: int, closed_price: float, reason: str = ""):
+        """Close a batch."""
+        query = """
+            UPDATE [dbo].[Trade_Batches]
+            SET IsActive = 0, ClosedDate = GETDATE(), ClosedPrice = ?, ClosedReason = ?
+            WHERE BatchID = ?
+        """
+        self.db.execute_update(query, (closed_price, reason, batch_id))
+        print(f"✅ Batch {batch_id} closed at {closed_price}")
+
+    # ========== SNAPSHOT OPERATIONS ==========
+
+    def insert_snapshot(self, batch_id: int, snapshot_data: Dict) -> int:
+        """
+        Insert intraday or EOD snapshot.
+
+        Args:
+            batch_id: ID of batch
+            snapshot_data: Dict with keys:
+                spy_price, iv_rank, vix,
+                put_delta, put_gamma, put_vega, put_theta,
+                call_delta, call_gamma, call_vega, call_theta,
+                current_pnl, probability_of_profit, expected_value,
+                recommended_action, recommendation_reason,
+                hard_stop (bool), hard_stop_reason,
+                snapshot_type (optional, default INTRADAY_2H),
+                is_eod (optional, bool)
+
+        Returns:
+            snapshot_id (int)
+        """
+        snapshot_time = snapshot_data.get("snapshot_time", datetime.now())
+        is_eod = snapshot_data.get("is_eod", 0)
+        snapshot_type = snapshot_data.get("snapshot_type", "INTRADAY_2H")
+
+        query = """
+            INSERT INTO [dbo].[Trade_Snapshots] (
+                BatchID, SnapshotTime, IsEOD, SnapshotType,
+                SPYPrice, IVRank, VIX,
+                PutDelta, PutGamma, PutVega, PutTheta,
+                CallDelta, CallGamma, CallVega, CallTheta,
+                CurrentPnL, ProbabilityOfProfit, ExpectedValue,
+                OverallStatus, RecommendedAction, RecommendationReason,
+                HardStopTriggered, HardStopReason, CreatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
+        """
+        params = (
+            batch_id,
+            snapshot_time,
+            is_eod,
+            snapshot_type,
+            snapshot_data["spy_price"],
+            snapshot_data["iv_rank"],
+            snapshot_data.get("vix", 0.0),
+            snapshot_data["put_delta"],
+            snapshot_data.get("put_gamma", 0.0),
+            snapshot_data.get("put_vega", 0.0),
+            snapshot_data.get("put_theta", 0.0),
+            snapshot_data["call_delta"],
+            snapshot_data.get("call_gamma", 0.0),
+            snapshot_data.get("call_vega", 0.0),
+            snapshot_data.get("call_theta", 0.0),
+            snapshot_data["current_pnl"],
+            snapshot_data.get("probability_of_profit", 0.0),
+            snapshot_data.get("expected_value", 0.0),
+            snapshot_data.get("overall_status", "GREEN"),
+            snapshot_data["recommended_action"],
+            snapshot_data.get("recommendation_reason", ""),
+            snapshot_data.get("hard_stop", False),
+            snapshot_data.get("hard_stop_reason", ""),
+        )
+        snapshot_id = self.db.execute_insert(query, params)
+        print(f"✅ Snapshot captured (Batch {batch_id}, ID: {snapshot_id})")
+        return snapshot_id
+
+    def get_latest_snapshot(self, batch_id: int) -> Dict:
+        """Get most recent snapshot for batch."""
+        query = """
+            SELECT TOP 1 * FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+            ORDER BY SnapshotTime DESC
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        if not rows:
+            return {}
+        # Basic conversion; expand as needed
+        return {"snapshot_id": rows[0][0], "spy_price": rows[0][3]}
+
+    def get_batch_snapshots(self, batch_id: int, limit: int = 100) -> List[Dict]:
+        """Get all snapshots for batch."""
+        query = f"""
+            SELECT TOP {limit} SnapshotTime, SPYPrice, CurrentPnL, OverallStatus
+            FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+            ORDER BY SnapshotTime DESC
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        return [
+            {
+                "snapshot_time": r[0],
+                "spy_price": r[1],
+                "current_pnl": r[2],
+                "status": r[3],
+            }
+            for r in rows
+        ]
+
+    # ========== HARD STOP OPERATIONS ==========
+
+    def log_hard_stop(
+        self,
+        batch_id: int,
+        stop_type: str,
+        stop_value: float,
+        spy_price: float,
+        notes: str = "",
+    ):
+        """
+        Log hard stop event.
+
+        Args:
+            batch_id: ID of batch
+            stop_type: MAX_LOSS, MARGIN_DANGER, ROLLED_3X, VOLATILITY_EVENT
+            stop_value: The value that triggered (e.g., -360 for max loss)
+            spy_price: SPY price at trigger
+            notes: Additional info
+        """
+        query = """
+            INSERT INTO [dbo].[Trade_HardStopLog] (
+                BatchID, StopType, StopValue, SPYPriceAtTrigger, Notes, TriggeredAt
+            ) VALUES (?, ?, ?, ?, ?, GETDATE())
+        """
+        self.db.execute_insert(query, (batch_id, stop_type, stop_value, spy_price, notes))
+        print(f"🛑 Hard stop logged: {stop_type} on Batch {batch_id}")
+
+    def get_hard_stops(self, batch_id: int) -> List[Dict]:
+        """Get all hard stops for batch."""
+        query = """
+            SELECT StopType, TriggeredAt, StopValue, Notes
+            FROM [dbo].[Trade_HardStopLog]
+            WHERE BatchID = ?
+            ORDER BY TriggeredAt DESC
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        return [
+            {
+                "stop_type": r[0],
+                "triggered_at": r[1],
+                "stop_value": r[2],
+                "notes": r[3],
+            }
+            for r in rows
+        ]
+
+    # ========== TRADE ACTION OPERATIONS ==========
+
+    def log_trade_action(
+        self,
+        batch_id: int,
+        action_type: str,
+        spy_price: float,
+        notes: str = "",
+    ):
+        """
+        Log trade action (ENTERED, HOLD, ROLLED, CLOSED).
+
+        Args:
+            batch_id: ID of batch
+            action_type: ENTERED, HOLD, ROLLED, CLOSED
+            spy_price: SPY price at action
+            notes: Additional details
+        """
+        query = """
+            INSERT INTO [dbo].[Trade_Actions] (
+                BatchID, ActionType, ActionDate, SPYPriceAtAction, Notes
+            ) VALUES (?, ?, GETDATE(), ?, ?)
+        """
+        self.db.execute_insert(query, (batch_id, action_type, spy_price, notes))
+        print(f"📝 Action logged: {action_type} on Batch {batch_id}")
+
+    def get_trade_actions(self, batch_id: int) -> List[Dict]:
+        """Get all actions for batch."""
+        query = """
+            SELECT ActionType, ActionDate, SPYPriceAtAction, Notes
+            FROM [dbo].[Trade_Actions]
+            WHERE BatchID = ?
+            ORDER BY ActionDate DESC
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        return [
+            {
+                "action_type": r[0],
+                "action_date": r[1],
+                "spy_price": r[2],
+                "notes": r[3],
+            }
+            for r in rows
+        ]
+
+    # ========== ROLL OPERATIONS ==========
+
+    def record_roll(self, roll_data: Dict) -> int:
+        """
+        Record roll transaction.
+
+        Args:
+            roll_data: Dict with keys:
+                original_batch_id, roll_date,
+                closed_side (PUT or CALL),
+                closed_at_price, closed_at_loss,
+                new_credit_collected, rolling_cost,
+                roll_reason
+
+        Returns:
+            roll_id (int)
+        """
+        query = """
+            INSERT INTO [dbo].[Trade_RolledPositions] (
+                OriginalBatchID, RollDate, ClosedSide,
+                ClosedAtPrice, ClosedAtLoss,
+                NewCreditCollected, RollingCost, RollReason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            roll_data["original_batch_id"],
+            roll_data.get("roll_date", datetime.now()),
+            roll_data["closed_side"],
+            roll_data["closed_at_price"],
+            roll_data["closed_at_loss"],
+            roll_data["new_credit_collected"],
+            roll_data["rolling_cost"],
+            roll_data["roll_reason"],
+        )
+        roll_id = self.db.execute_insert(query, params)
+        print(f"🔄 Roll recorded (ID: {roll_id})")
+        return roll_id
+
+    def get_rolls(self, batch_id: int) -> List[Dict]:
+        """Get all rolls for batch."""
+        query = """
+            SELECT RollID, RollDate, ClosedSide, ClosedAtPrice, RollingCost
+            FROM [dbo].[Trade_RolledPositions]
+            WHERE OriginalBatchID = ?
+            ORDER BY RollDate DESC
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        return [
+            {
+                "roll_id": r[0],
+                "roll_date": r[1],
+                "closed_side": r[2],
+                "closed_at_price": r[3],
+                "rolling_cost": r[4],
+            }
+            for r in rows
+        ]
+
+    # ========== PORTFOLIO & ANALYTICS ==========
+
+    def get_portfolio_summary(self, date_str: str = None) -> Dict:
+        """
+        Get portfolio summary for given date.
+
+        Args:
+            date_str: 'YYYY-MM-DD' or None for today
+
+        Returns:
+            Dict with summary stats
+        """
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
+        query = """
+            SELECT
+                COUNT(DISTINCT b.BatchID) AS active_batches,
+                SUM(ts.CurrentPnL) AS total_pnl,
+                AVG(ts.ProbabilityOfProfit) AS avg_pop,
+                SUM(ts.CallDelta + ts.PutDelta) AS total_delta,
+                SUM(ts.CallTheta + ts.PutTheta) AS daily_theta
+            FROM [dbo].[Trade_Batches] b
+            LEFT JOIN [dbo].[Trade_Snapshots] ts ON b.BatchID = ts.BatchID
+            WHERE b.IsActive = 1 AND CAST(ts.SnapshotTime AS DATE) = ?
+        """
+        rows = self.db.execute_query(query, (date_str,))
+        if rows:
+            r = rows[0]
+            return {
+                "active_batches": r[0] or 0,
+                "total_pnl": r[1] or 0.0,
+                "avg_pop": r[2] or 0.0,
+                "portfolio_delta": r[3] or 0.0,
+                "daily_theta": r[4] or 0.0,
+            }
+        return {
+            "active_batches": 0,
+            "total_pnl": 0.0,
+            "avg_pop": 0.0,
+            "portfolio_delta": 0.0,
+            "daily_theta": 0.0,
+        }
+
+    def get_performance_statistics(self, batch_id: int) -> Dict:
+        """Get performance stats for batch."""
+        query = """
+            SELECT
+                COUNT(*) AS total_snapshots,
+                MAX(CurrentPnL) AS max_pnl,
+                MIN(CurrentPnL) AS min_pnl,
+                AVG(ProbabilityOfProfit) AS avg_pop
+            FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        rolls = self.get_rolls(batch_id)
+
+        if rows:
+            r = rows[0]
+            return {
+                "total_snapshots": r[0],
+                "current_pnl": r[1],
+                "max_pnl": r[1],
+                "min_pnl": r[2],
+                "avg_pop": r[3] or 0.0,
+                "total_rolls": len(rolls),
+            }
+        return {
+            "total_snapshots": 0,
+            "current_pnl": 0.0,
+            "max_pnl": 0.0,
+            "min_pnl": 0.0,
+            "avg_pop": 0.0,
+            "total_rolls": 0,
+        }
+
+    # ========== EXPORT OPERATIONS ==========
+
+    def export_journal_to_csv(self, batch_id: int, output_dir: str = "exports") -> str:
+        """Export trade journal to CSV."""
+        Path(output_dir).mkdir(exist_ok=True)
+
+        query = """
+            SELECT
+                SnapshotTime, SPYPrice, CurrentPnL, ProbabilityOfProfit,
+                PutDelta, CallDelta, RecommendedAction, OverallStatus
+            FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+            ORDER BY SnapshotTime
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Time",
+                "SPY Price",
+                "P&L",
+                "POP",
+                "Put Delta",
+                "Call Delta",
+                "Action",
+                "Status",
+            ],
+        )
+
+        filename = (
+            f"{output_dir}/batch_{batch_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        df.to_csv(filename, index=False)
+        print(f"✅ Journal exported: {filename}")
+        return filename
+
+    def export_journal_to_excel(
+        self, batch_id: int, output_dir: str = "exports"
+    ) -> str:
+        """Export trade journal to Excel."""
+        Path(output_dir).mkdir(exist_ok=True)
+
+        query = """
+            SELECT
+                SnapshotTime, SPYPrice, CurrentPnL, ProbabilityOfProfit,
+                PutDelta, CallDelta, RecommendedAction, OverallStatus
+            FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+            ORDER BY SnapshotTime
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+
+        df = pd.DataFrame(
+            rows,
+            columns=[
+                "Time",
+                "SPY Price",
+                "P&L",
+                "POP",
+                "Put Delta",
+                "Call Delta",
+                "Action",
+                "Status",
+            ],
+        )
+
+        filename = (
+            f"{output_dir}/batch_{batch_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
+        df.to_excel(filename, index=False)
+        print(f"✅ Journal exported: {filename}")
+        return filename
+
+    def generate_trade_journal(self, batch_id: int) -> pd.DataFrame:
+        """Get complete trade journal as DataFrame."""
+        query = """
+            SELECT
+                SnapshotTime, SPYPrice, CurrentPnL, ProbabilityOfProfit,
+                PutDelta, CallDelta, PutTheta, CallTheta, RecommendedAction
+            FROM [dbo].[Trade_Snapshots]
+            WHERE BatchID = ?
+            ORDER BY SnapshotTime
+        """
+        rows = self.db.execute_query(query, (batch_id,))
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "SnapshotTime",
+                "SPYPrice",
+                "CurrentPnL",
+                "POP",
+                "PutDelta",
+                "CallDelta",
+                "PutTheta",
+                "CallTheta",
+                "Action",
+            ],
+        )
+
+
+# ============================================================================
+# INTRADAY CAPTURE AUTOMATION
+# ============================================================================
+
+class IntraDayCapture:
+    """Automated intraday snapshot capture (every 2 hours + EOD)."""
+
+    def __init__(self, manager: TradeBlogManager):
+        self.manager = manager
+
+    def capture_intraday(self, batch_id: int, position_data: Dict) -> int:
+        """
+        Capture intraday snapshot.
+
+        Args:
+            batch_id: Batch ID
+            position_data: Dict with spy_price, put/call deltas, current_pnl, etc.
+
+        Returns:
+            snapshot_id
+        """
+        snapshot_data = {
+            "snapshot_time": datetime.now(),
+            "is_eod": 0,
+            "snapshot_type": "INTRADAY_2H",
+            **position_data,
+        }
+        return self.manager.insert_snapshot(batch_id, snapshot_data)
+
+    def capture_eod(self, batch_id: int, position_data: Dict) -> int:
+        """
+        Capture end-of-day snapshot.
+
+        Args:
+            batch_id: Batch ID
+            position_data: Dict with final Greeks
+
+        Returns:
+            snapshot_id
+        """
+        snapshot_data = {
+            "snapshot_time": datetime.now(),
+            "is_eod": 1,
+            "snapshot_type": "EOD",
+            **position_data,
+        }
+        return self.manager.insert_snapshot(batch_id, snapshot_data)
+
+
+# ============================================================================
+# METRICS CALCULATOR
+# ============================================================================
+
+class MetricsCalculator:
+    """Calculate trading metrics (POP, EV, status)."""
+
+    @staticmethod
+    def calculate_pop(put_delta: float, call_delta: float) -> float:
+        """
+        Calculate Probability of Profit.
+        POP = (1 - |put_delta|) * (1 - |call_delta|)
+        """
+        return (1 - abs(put_delta)) * (1 - abs(call_delta)) * 100
+
+    @staticmethod
+    def calculate_ev(pop: float, max_profit: float, max_loss: float) -> float:
+        """
+        Calculate Expected Value.
+        EV = (POP * max_profit) - ((1 - POP) * max_loss)
+        """
+        pop_decimal = pop / 100
+        return (pop_decimal * max_profit) - ((1 - pop_decimal) * abs(max_loss))
+
+    @staticmethod
+    def calculate_status(put_delta: float, call_delta: float) -> str:
+        """Determine batch status."""
+        if abs(put_delta) > 0.35 or abs(call_delta) > 0.35:
+            return "RED"
+        elif abs(put_delta) > 0.25 or abs(call_delta) > 0.25:
+            return "YELLOW"
+        return "GREEN"
+
+
+# ============================================================================
+# DECISION ENGINE
+# ============================================================================
+
+class DecisionEngine:
+    """Generate trading recommendations based on batch metrics."""
+
+    @staticmethod
+    def recommend_action(
+        put_delta: float,
+        call_delta: float,
+        days_to_expiry: int,
+        current_pnl: float,
+        max_loss: float = -360.0,
+    ) -> Tuple[str, str]:
+        """
+        Generate action recommendation.
+
+        Args:
+            put_delta: Short put delta
+            call_delta: Short call delta
+            days_to_expiry: Days remaining
+            current_pnl: Current P&L
+            max_loss: Max loss threshold
+
+        Returns:
+            (action, reason) tuple
+        """
+        # Hard stops
+        if current_pnl <= max_loss:
+            return "CLOSE", f"Max loss (-${abs(max_loss)}) hit"
+
+        # Roll conditions
+        if days_to_expiry > 10:
+            if abs(put_delta) > 0.35:
+                return "ROLL", f"Put ITM (delta {put_delta:.2f}), days {days_to_expiry}"
+            if abs(call_delta) > 0.35:
+                return "ROLL", f"Call ITM (delta {call_delta:.2f}), days {days_to_expiry}"
+
+        # Otherwise hold
+        return "HOLD", "Let theta work"
+
+
+# ============================================================================
+# MAIN USAGE EXAMPLE
+# ============================================================================
+
+if __name__ == "__main__":
+    # Initialize
+    manager = TradeBlogManager()
+
+    # Example: Create batch
+    batch_data = {
+        "batch_name": "BATCH_1",
+        "entry_date": datetime(2026, 1, 22).date(),
+        "expiration_date": datetime(2026, 3, 7).date(),
+        "put_long_strike": 665.0,
+        "put_short_strike": 670.0,
+        "call_short_strike": 710.0,
+        "call_long_strike": 715.0,
+        "entry_price": 689.50,
+        "credit_collected": 140.0,
+        "spread_width": 500.0,
+        "number_of_spreads": 20,
+        "entry_iv_rank": 58.0,
+        "entry_vix": 16.5,
+    }
+    batch_id = manager.insert_batch(batch_data)
+
+    # Example: Capture snapshot using mibian Greeks
+    try:
+        spy_snap = manager.greeks_engine.get_spy_snapshot(
+            expiry="2026-02-20", put_strike=670.0, call_strike=710.0
+        )
+        print(f"\n📊 Greeks Snapshot:\n{json.dumps(spy_snap, indent=2, default=str)}")
+
+        # Calculate metrics
+        pop = MetricsCalculator.calculate_pop(
+            spy_snap["put_delta"], spy_snap["call_delta"]
+        )
+        ev = MetricsCalculator.calculate_ev(pop, max_profit=140.0, max_loss=-360.0)
+        status = MetricsCalculator.calculate_status(
+            spy_snap["put_delta"], spy_snap["call_delta"]
+        )
+        action, reason = DecisionEngine.recommend_action(
+            spy_snap["put_delta"],
+            spy_snap["call_delta"],
+            spy_snap["days_to_expiry"],
+            current_pnl=35.0,
+        )
+
+        # Build position data
+        position_data = {
+            "spy_price": spy_snap["spot"],
+            "iv_rank": 58.0,
+            "vix": 16.5,
+            "put_delta": spy_snap["put_delta"],
+            "put_gamma": spy_snap["put_gamma"],
+            "put_vega": spy_snap["put_vega"],
+            "put_theta": spy_snap["put_theta"],
+            "call_delta": spy_snap["call_delta"],
+            "call_gamma": spy_snap["call_gamma"],
+            "call_vega": spy_snap["call_vega"],
+            "call_theta": spy_snap["call_theta"],
+            "current_pnl": 35.0,
+            "probability_of_profit": pop,
+            "expected_value": ev,
+            "overall_status": status,
+            "recommended_action": action,
+            "recommendation_reason": reason,
+            "hard_stop": False,
+        }
+
+        # Capture
+        capture = IntraDayCapture(manager)
+        snapshot_id = capture.capture_intraday(batch_id, position_data)
+
+        print(f"\n✅ Snapshot captured (ID: {snapshot_id})")
+        print(f"   Recommendation: {action} ({reason})")
+
+        # Export
+        csv_file = manager.export_journal_to_csv(batch_id)
+        print(f"   Journal: {csv_file}")
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
