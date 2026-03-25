@@ -5,7 +5,10 @@ import Main_Daily_Indicators_ETF as mde
 import Main_Daily_VWAP as mdv
 import Util_Email as ue
 import holidays
-
+import FVG_Daily as fvg
+import Util as u
+import Main_Daily_SNDK as sndk
+import Main_Daily_HighPremium as mhp
 # Define the connection string         
 conStr = (
         r'DRIVER={ODBC Driver 17 for SQL Server};'
@@ -42,12 +45,27 @@ try:
             logger.info("EOD Get Price completed.")
             # Call EOD Indicator and VWAP calculations
             mdi.main()
-            logger.info("EOD Indicator calculation completed.")
+            logger.info("EOD Stock Indicator calculation completed.")
             mdv.update_recent_weekly_vwap()
             logger.info("EOD VWAP calculation completed.")
-            # Send success email
             mde.main()
-            logger.info("ETF indicators run completed successfully.")
+            logger.info("ETF Indicator calculation completed.")
+            fvg.generate_daily_recommendations()
+            logger.info("FVG calculation completed.")
+            # Send success email
+            logger.info("EOD ETF indicators run completed successfully.")
+            # Update the uptrend workflow and gap up workflow
+            u.sql_execute_query(conStr, "Stock..[sp_UpTrend_DailyWorkflow] ", None)
+            logger.info("UpTrend Daily Workflow completed successfully.")
+            # Update the gap up workflow
+            u.sql_execute_query(conStr, "Stock..[sp_DailyRun_GapUp] ", None)
+            logger.info("Daily Gap Up completed successfully.")
+            #SNDK workflow
+            sndk.main()
+            logger.info("SNDK workflow completed successfully.")
+            # High Premium workflow
+            mhp.main()
+            logger.info("High Premium workflow completed successfully.")
             ue.send_email("INFO:EOD Daily Run completed", "EOD Daily Run Log File succeed.",None)
         else:
             logger.info("Intra day run")

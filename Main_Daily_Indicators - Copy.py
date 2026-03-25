@@ -14,7 +14,6 @@ def fetch_market_data():
     FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY Symbol ORDER BY [time] DESC) as rn
         FROM [dbo].[AI_stock_prices]
-       
     ) t
     WHERE rn <= 300 
     ORDER BY Symbol, [time] ASC
@@ -22,97 +21,6 @@ def fetch_market_data():
     return pd.read_sql(query, engine)
 
 def compute_indicators(df):
-    # Ensure data is sorted for time-series integrity
-    df = df.sort_values(['Symbol', 'time'])
-    group = df.groupby('Symbol')
-    
-    # 1. SMAs (Short, Mid, Long)
-    for p in [5, 10, 20, 50, 100, 200]:
-        df[f'SMA_{p}'] = group['close'].transform(lambda x: x.rolling(p).mean())
-
-    # 2. Bollinger Bands (10 and 20 periods)
-    for p in [10, 20]:
-        sma = group['close'].transform(lambda x: x.rolling(p).mean())
-        std = group['close'].transform(lambda x: x.rolling(p).std())
-        df[f'BB_Upper_{p}'] = sma + (std * 2)
-        df[f'BB_Lower_{p}'] = sma - (std * 2)
-
-    # 3. RSI Logic (Standard Vectorized)
-    def get_rsi(series, period):
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-
-    for p in [5, 7, 9, 14, 21, 25]:
-        df[f'RSI_{p}'] = group['close'].transform(lambda x: get_rsi(x, p))
-
-    # 4. ATR (Fixes FutureWarning)
-    prev_close = group['close'].shift(1)
-    tr1 = df['high'] - df['low']
-    tr2 = (df['high'] - prev_close).abs()
-    tr3 = (df['low'] - prev_close).abs()
-    df['TR_temp'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    for p in [5, 14, 22]:
-        df[f'ATR_{p}'] = group['TR_temp'].transform(lambda x: x.rolling(p).mean())
-    df.drop(columns=['TR_temp'], inplace=True)
-
-    # 5. MACD (12, 26, 9)
-    ema12 = group['close'].transform(lambda x: x.ewm(span=12, adjust=False).mean())
-    ema26 = group['close'].transform(lambda x: x.ewm(span=26, adjust=False).mean())
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = group['MACD'].transform(lambda x: x.ewm(span=9, adjust=False).mean())
-
-    # 6. HV & Percentile
-    df['log_ret'] = group['close'].transform(lambda x: np.log(x / x.shift(1)))
-    df['HV_21'] = group['log_ret'].transform(lambda x: x.rolling(21).std() * np.sqrt(252))
-    
-    rolling_min = group['HV_21'].transform(lambda x: x.rolling(252).min())
-    rolling_max = group['HV_21'].transform(lambda x: x.rolling(252).max())
-    df['HV_Percentile'] = ((df['HV_21'] - rolling_min) / (rolling_max - rolling_min)).fillna(0.5)
-
-    # 7. TTM Squeeze Components
-    df['EMA_20'] = group['close'].transform(lambda x: x.ewm(span=20, adjust=False).mean())
-    df['KC_Upper'] = df['EMA_20'] + (df['ATR_14'] * 1.5)
-    df['KC_Lower'] = df['EMA_20'] - (df['ATR_14'] * 1.5)
-    
-    # Squeeze On/Off (Boolean)
-    df['Squeeze_On'] = ((df['BB_Upper_20'] < df['KC_Upper']) & (df['BB_Lower_20'] > df['KC_Lower'])).astype(int)
-
-    # 8. NEW: Momentum Histogram Calculation
-    # Midline = (20-period Donchian Midpoint + 20-period SMA) / 2
-    hh_20 = group['high'].transform(lambda x: x.rolling(20).max())
-    ll_20 = group['low'].transform(lambda x: x.rolling(20).min())
-    donchian_mid = (hh_20 + ll_20) / 2
-    
-    ttm_midline = (donchian_mid + df['SMA_20']) / 2
-    df['Momentum_Histogram'] = df['close'] - ttm_midline
-
-    # 9. Z-Score (Volatility check)
-    df['ZScore_20'] = (df['close'] - df['SMA_20']) / group['close'].transform(lambda x: x.rolling(20).std())
-
-    # 10. NEW: Fire Signal Detection (The Trigger)
-    # Detect the shift from 1 (Squeeze) to 0 (Release)
-    df['Prev_Squeeze_On'] = group['Squeeze_On'].shift(1)
-    
-    df['Squeeze_Signal'] = 'Neutral'
-    
-    # Long Fire Logic
-    long_fire = (df['Squeeze_On'] == 0) & (df['Prev_Squeeze_On'] == 1) & (df['Momentum_Histogram'] > 0) & (df['ZScore_20'] > 2)
-    df.loc[long_fire, 'Squeeze_Signal'] = 'Long Fire'
-    
-    # Short Fire Logic
-    short_fire = (df['Squeeze_On'] == 0) & (df['Prev_Squeeze_On'] == 1) & (df['Momentum_Histogram'] < 0) & (df['ZScore_20'] < -2)
-    df.loc[short_fire, 'Squeeze_Signal'] = 'Short Fire'
-    
-    # Cleanup temp column
-    df.drop(columns=['Prev_Squeeze_On'], inplace=True)
-
-    return df
-
-def compute_indicators_Old(df):
     # Ensure data is sorted for time-series integrity
     df = df.sort_values(['Symbol', 'time'])
     group = df.groupby('Symbol')
@@ -262,9 +170,9 @@ def main():
     # # Cleaning up intermediate columns before SQL load
     # cols_to_save = ['Symbol', 'time', 'SMA_5', 'SMA_10', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200',
     #                 'BB_Upper_10', 'BB_Lower_10', 'BB_Upper_20', 'BB_Lower_20',
-    #                 'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags','Momentum_Histogram']
+    #                 'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags']
     
-    # final_df[cols_to_save].to_sql("AI_stock_indicators_New", engine, if_exists='append', index=False)
+    # daily_batch[cols_to_save].to_sql("AI_stock_indicators", engine, if_exists='append', index=False)
     #------------------------
     # --- Data Sanitization Block ---
     # 1. Replace Infinity with NaN
@@ -272,7 +180,7 @@ def main():
     daily_batch = daily_batch.replace([np.inf, -np.inf], np.nan)
     cols_to_save = ['Symbol', 'time', 'SMA_5', 'SMA_10', 'SMA_20', 'SMA_50', 'SMA_100', 'SMA_200',
                      'BB_Upper_10', 'BB_Lower_10', 'BB_Upper_20', 'BB_Lower_20',
-                     'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags','Momentum_Histogram']
+                     'RSI_14', 'ATR_14', 'MACD', 'HV_21', 'HV_Percentile', 'Squeeze_On', 'ZScore_20', 'Signal_Flags']
     # 2. Fill NaN with None (SQLAlchemy treats None as SQL NULL)
     # We apply this specifically to the numeric columns
     numeric_cols = daily_batch.select_dtypes(include=[np.number]).columns

@@ -2,9 +2,9 @@ import yfinance as yf
 import mibian
 from datetime import datetime
 
-symbol = "SPY"
-expiry = "2026-02-20"          # option expiry
-strike = 705                   # example strike
+symbol = "ALAB"
+expiry = "2026-03-20"          # option expiry
+strike = 220                   # example strike
 r = 0.05                       # risk‑free rate (5% placeholder)
 
 # 1. Get underlying spot
